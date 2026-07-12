@@ -56,16 +56,246 @@ from xconsole_client.oauth_protocol import extract_cookies_from_auth_client
 YESCAPTCHA_KEY = os.environ.get("YESCAPTCHA_API_KEY", "")
 SOLVER_PROVIDER = resolve_solver_provider(os.environ.get("TURNSTILE_SOLVER"))
 TEMPMAIL_KEY = os.environ.get("TEMPMAIL_API_KEY", "")
+TEMPMAIL_KEYS: list[str] = []  # filled by _refresh_tempmail_keys()
+TEMPMAIL_POLL_INTERVAL = float(os.environ.get("TEMPMAIL_POLL_INTERVAL") or 3)
+TEMPMAIL_KEY_ROTATE_INTERVAL = float(os.environ.get("TEMPMAIL_KEY_ROTATE_INTERVAL") or 0)
+TURNSTILE_MAX_RETRIES = int(float(os.environ.get("TURNSTILE_MAX_RETRIES") or 2))
+ACCOUNT_INTERVAL = float(os.environ.get("ACCOUNT_INTERVAL") or 0)
+# Tempmail per-key rate limit: default 25 emails / 300s (5 min)
+TEMPMAIL_RATE_LIMIT = int(float(os.environ.get("TEMPMAIL_RATE_LIMIT") or 25))
+TEMPMAIL_RATE_WINDOW = float(os.environ.get("TEMPMAIL_RATE_WINDOW") or 300)
+TEMPMAIL_AUTO_PACE = str(os.environ.get("TEMPMAIL_AUTO_PACE") or "1").strip().lower() not in (
+    "0", "false", "no", "off", ""
+)
+_tempmail_key_lock = threading.Lock()
+_tempmail_key_idx = 0
+_tempmail_last_take = 0.0
+_tempmail_usage: dict[str, list[float]] = {}  # key -> create timestamps (sliding window)
+
+# Shared runtime globals (must always exist for register_one / panel)
 SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
 PROXY = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
-
 _results_lock = threading.Lock()
 _cf_lock = threading.Lock()
 _oauth_lock = threading.Lock()  # Playwright/browser OAuth is safer serialized
-_results: list[dict] = []
 _done = 0
 _total = 0
 _t0 = 0.0
+
+
+
+def _parse_tempmail_keys(*raw_values: str) -> list[str]:
+    """Parse one or more env/text blobs into unique non-empty API keys."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        # support comma / newline / semicolon separated lists
+        for part in raw.replace(";", "\n").replace(",", "\n").splitlines():
+            k = part.strip()
+            if not k or k.startswith("#"):
+                continue
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+    return keys
+
+
+
+
+def _refresh_runtime_tuning() -> None:
+    """Reload turnstile retries / account interval / tempmail rate from env."""
+    global TURNSTILE_MAX_RETRIES, ACCOUNT_INTERVAL
+    global TEMPMAIL_RATE_LIMIT, TEMPMAIL_RATE_WINDOW, TEMPMAIL_AUTO_PACE
+    try:
+        TURNSTILE_MAX_RETRIES = max(0, int(float(os.environ.get("TURNSTILE_MAX_RETRIES") or 2)))
+    except Exception:
+        TURNSTILE_MAX_RETRIES = 2
+    try:
+        ACCOUNT_INTERVAL = max(0.0, float(os.environ.get("ACCOUNT_INTERVAL") or 0))
+    except Exception:
+        ACCOUNT_INTERVAL = 0.0
+    try:
+        TEMPMAIL_RATE_LIMIT = max(1, int(float(os.environ.get("TEMPMAIL_RATE_LIMIT") or 25)))
+    except Exception:
+        TEMPMAIL_RATE_LIMIT = 25
+    try:
+        TEMPMAIL_RATE_WINDOW = max(1.0, float(os.environ.get("TEMPMAIL_RATE_WINDOW") or 300))
+    except Exception:
+        TEMPMAIL_RATE_WINDOW = 300.0
+    TEMPMAIL_AUTO_PACE = str(os.environ.get("TEMPMAIL_AUTO_PACE") or "1").strip().lower() not in (
+        "0", "false", "no", "off", ""
+    )
+
+
+def tempmail_capacity_info(threads: int = 1) -> dict:
+    """Capacity / pacing advice from current key count and rate limit.
+
+    Default: each key allows TEMPMAIL_RATE_LIMIT creates per TEMPMAIL_RATE_WINDOW seconds.
+
+    Important: concurrent workers can still *burst* creates unless a global create
+    gate spaces them. ``min_create_interval`` is the safe gap between any two
+    inbox creates (all threads share it).
+    """
+    keys = TEMPMAIL_KEYS or _refresh_tempmail_keys()
+    n = max(0, len(keys))
+    limit = max(1, int(TEMPMAIL_RATE_LIMIT or 25))
+    window = max(1.0, float(TEMPMAIL_RATE_WINDOW or 300))
+    capacity = max(1, n * limit) if n else 1  # emails per window
+    thr = max(1, int(threads or 1))
+    # base spacing to stay under aggregate quota
+    base = window / float(capacity)
+    # safety margin against burst/429 (tempmail is sensitive to parallel creates)
+    safety = 1.5
+    min_create_interval = max(0.5, base * safety)
+    # account_interval for serial loop; for parallel, create-gate dominates
+    suggested_account_interval = min_create_interval if thr <= 1 else min_create_interval
+    # recommended max threads: don't exceed key count (1 create per key at a time ideally)
+    suggested_threads = max(1, min(thr, n if n else 1, 5))
+    per_minute = (capacity / (window / 60.0)) / safety if window else 0.0
+    return {
+        "keys": n,
+        "rate_limit": limit,
+        "rate_window": window,
+        "capacity_per_window": n * limit,
+        "per_minute": round(per_minute, 2),
+        "min_interval": round(base, 3),
+        "min_create_interval": round(min_create_interval, 3),
+        "suggested_account_interval": round(suggested_account_interval, 3),
+        "suggested_threads": suggested_threads,
+        "threads": thr,
+        "auto_pace": bool(TEMPMAIL_AUTO_PACE),
+    }
+
+
+def _purge_tempmail_usage(key: str, now: float) -> list[float]:
+    window = max(1.0, float(TEMPMAIL_RATE_WINDOW or 300))
+    arr = _tempmail_usage.get(key) or []
+    arr = [ts for ts in arr if (now - ts) < window]
+    _tempmail_usage[key] = arr
+    return arr
+
+
+def _tempmail_key_wait(key: str, now: float) -> float:
+    """Seconds until this key can accept another create (0 if ready)."""
+    limit = max(1, int(TEMPMAIL_RATE_LIMIT or 25))
+    window = max(1.0, float(TEMPMAIL_RATE_WINDOW or 300))
+    arr = _purge_tempmail_usage(key, now)
+    if len(arr) < limit:
+        return 0.0
+    oldest = arr[0]
+    return max(0.0, window - (now - oldest) + 0.05)
+
+
+def _record_tempmail_take(key: str, now: float) -> None:
+    arr = _purge_tempmail_usage(key, now)
+    arr.append(now)
+    _tempmail_usage[key] = arr
+
+
+def _tempmail_usage_snapshot() -> list[dict]:
+    now = time.time()
+    keys = TEMPMAIL_KEYS or []
+    limit = max(1, int(TEMPMAIL_RATE_LIMIT or 25))
+    out = []
+    for i, k in enumerate(keys):
+        arr = _purge_tempmail_usage(k, now)
+        out.append({
+            "index": i,
+            "key_masked": (k[:4] + "*" * max(0, len(k) - 4)) if k else "",
+            "used": len(arr),
+            "limit": limit,
+            "remaining": max(0, limit - len(arr)),
+            "wait_s": round(_tempmail_key_wait(k, now), 2),
+        })
+    return out
+
+
+def _refresh_tempmail_keys() -> list[str]:
+    """Reload tempmail keys from env. Supports TEMPMAIL_API_KEYS + TEMPMAIL_API_KEY."""
+    global TEMPMAIL_KEY, TEMPMAIL_KEYS, TEMPMAIL_POLL_INTERVAL, TEMPMAIL_KEY_ROTATE_INTERVAL
+    multi = os.environ.get("TEMPMAIL_API_KEYS", "")
+    single = os.environ.get("TEMPMAIL_API_KEY", "")
+    keys = _parse_tempmail_keys(multi, single)
+    TEMPMAIL_KEYS = keys
+    TEMPMAIL_KEY = keys[0] if keys else ""
+    try:
+        TEMPMAIL_POLL_INTERVAL = float(os.environ.get("TEMPMAIL_POLL_INTERVAL") or 3)
+    except Exception:
+        TEMPMAIL_POLL_INTERVAL = 3.0
+    try:
+        TEMPMAIL_KEY_ROTATE_INTERVAL = float(os.environ.get("TEMPMAIL_KEY_ROTATE_INTERVAL") or 0)
+    except Exception:
+        TEMPMAIL_KEY_ROTATE_INTERVAL = 0.0
+    return keys
+
+
+def _take_tempmail_key() -> str:
+    """Pick a tempmail key with round-robin + per-key quota + global create gate.
+
+    Concurrent workers share one global create spacing so threads=5 cannot burst
+    5 creates at t=0 (which triggers Tempmail 429).
+    """
+    global _tempmail_key_idx, _tempmail_last_take
+    keys = TEMPMAIL_KEYS or _refresh_tempmail_keys()
+    if not keys:
+        raise RuntimeError("TEMPMAIL_API_KEY / TEMPMAIL_API_KEYS ???")
+
+    while True:
+        wait_outside = 0.0
+        chosen = ""
+        with _tempmail_key_lock:
+            keys = TEMPMAIL_KEYS or _refresh_tempmail_keys()
+            if not keys:
+                raise RuntimeError("TEMPMAIL_API_KEY / TEMPMAIL_API_KEYS ???")
+
+            now = time.time()
+            # 1) global create gate (all threads)
+            info = tempmail_capacity_info(threads=1)
+            # user KEY_ROTATE_INTERVAL is a floor; auto-pace uses capacity spacing
+            global_gap = float(TEMPMAIL_KEY_ROTATE_INTERVAL or 0)
+            if TEMPMAIL_AUTO_PACE:
+                global_gap = max(global_gap, float(info.get("min_create_interval") or 0))
+            # even without auto-pace, still enforce hard quota-based spacing lightly
+            # so threads cannot dump creates: at least base interval (no safety) 
+            global_gap = max(global_gap, float(info.get("min_interval") or 0) * 1.1)
+
+            if _tempmail_last_take > 0 and global_gap > 0:
+                gwait = global_gap - (now - _tempmail_last_take)
+                if gwait > 0:
+                    wait_outside = gwait
+
+            if wait_outside <= 0:
+                now = time.time()
+                n = len(keys)
+                best_offset = 0
+                best_wait = None
+                ready_offset = None
+                for offset in range(n):
+                    k = keys[(_tempmail_key_idx + offset) % n]
+                    w = _tempmail_key_wait(k, now)
+                    if w <= 0:
+                        ready_offset = offset
+                        break
+                    if best_wait is None or w < best_wait:
+                        best_wait = w
+                        best_offset = offset
+                if ready_offset is not None:
+                    idx = (_tempmail_key_idx + ready_offset) % n
+                    chosen = keys[idx]
+                    _tempmail_key_idx = (idx + 1) % n
+                    _record_tempmail_take(chosen, now)
+                    _tempmail_last_take = now
+                else:
+                    wait_outside = float(best_wait or 1.0)
+                    _tempmail_key_idx = (_tempmail_key_idx + best_offset) % n
+
+        if chosen:
+            return chosen
+        end = time.time() + max(0.05, wait_outside)
+        while time.time() < end:
+            time.sleep(min(0.25, end - time.time()))
 
 
 def _log(i: int, msg: str):
@@ -77,10 +307,14 @@ def _log(i: int, msg: str):
 def _make_email_provider(backend: str):
     """Return (email, receiver) — receiver has .wait_for_code(timeout)."""
     if backend == "tempmail":
-        if not TEMPMAIL_KEY:
-            raise RuntimeError("TEMPMAIL_API_KEY 环境变量未设置")
+        key = _take_tempmail_key()
         from xconsole_client.tempmail_transport import TempmailInbox
-        inbox = TempmailInbox(api_key=TEMPMAIL_KEY, prefix="xai", debug=False)
+        inbox = TempmailInbox(
+            api_key=key,
+            prefix="xai",
+            interval=float(TEMPMAIL_POLL_INTERVAL or 3),
+            debug=False,
+        )
         email = inbox.create()
         return email, inbox
     elif backend == "cloudflare":
@@ -119,6 +353,8 @@ def register_one(
     cliproxyapi_auth_dir: Optional[str | Path] = None,
     cliproxyapi_base_url: str = CLIPROXYAPI_GROK_BASE_URL,
     accounts_output_dir: Optional[str | Path] = None,
+    turnstile_max_retries: Optional[int] = None,
+    account_interval: Optional[float] = None,
 ) -> dict:
     """Run signup (+ optional Build OAuth export). Thread-safe."""
     cfg_err = solver_config_error(SOLVER_PROVIDER)
@@ -131,6 +367,19 @@ def register_one(
             "cliproxyapi_auth": None,
             "error": cfg_err,
         }
+
+    # Per-account runtime overrides (panel / CLI)
+    global TURNSTILE_MAX_RETRIES, ACCOUNT_INTERVAL
+    if turnstile_max_retries is not None:
+        try:
+            TURNSTILE_MAX_RETRIES = max(0, int(turnstile_max_retries))
+        except Exception:
+            pass
+    if account_interval is not None:
+        try:
+            ACCOUNT_INTERVAL = max(0.0, float(account_interval))
+        except Exception:
+            pass
 
     # Per-client signup_url — never mutate global C.SIGNUP_URL under concurrency.
     c = XConsoleAuthClient(debug=False, signup_url=SIGNUP_URL)
@@ -156,12 +405,39 @@ def register_one(
         c.validate_password(email, password)
         _log(index, "email verified")
 
-        # 3. turnstile
+        # 3. turnstile (with retries for flaky local solvers e.g. EzSolver browser)
         solver = create_solver(provider=SOLVER_PROVIDER, debug=False)
         backend = getattr(solver, "name", SOLVER_PROVIDER)
-        turnstile = solver.solve_turnstile(
-            website_url=SIGNUP_URL, website_key=C.TURNSTILE_SITEKEY, premium=True)
-        _log(index, f"Turnstile[{backend}] {len(turnstile)} chars")
+        try:
+            max_retries = int(TURNSTILE_MAX_RETRIES)
+        except Exception:
+            max_retries = 2
+        max_retries = max(0, min(max_retries, 10))
+        attempts = max_retries + 1
+        turnstile = ""
+        last_ts_err: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                if attempt > 1:
+                    # recreate solver client between retries
+                    solver = create_solver(provider=SOLVER_PROVIDER, debug=False)
+                    backend = getattr(solver, "name", SOLVER_PROVIDER)
+                turnstile = solver.solve_turnstile(
+                    website_url=SIGNUP_URL, website_key=C.TURNSTILE_SITEKEY, premium=True)
+                if attempt > 1:
+                    _log(index, f"Turnstile[{backend}] ok on retry {attempt}/{attempts} ({len(turnstile)} chars)")
+                else:
+                    _log(index, f"Turnstile[{backend}] {len(turnstile)} chars")
+                last_ts_err = None
+                break
+            except Exception as exc:
+                last_ts_err = exc
+                _log(index, f"Turnstile[{backend}] fail {attempt}/{attempts}: {exc}")
+                if attempt < attempts:
+                    # short backoff; give local browser time to recover
+                    time.sleep(min(2.0 * attempt, 10.0))
+        if last_ts_err is not None or not turnstile:
+            raise RuntimeError(f"Turnstile failed after {attempts} attempt(s): {last_ts_err}")
 
         # 4. create account
         res = c.create_account(

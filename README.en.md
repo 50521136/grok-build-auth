@@ -221,3 +221,39 @@ See [`SECURITY.md`](SECURITY.md). Do not upload API keys, SSO JWTs, OAuth tokens
 ## License
 
 [MIT](LICENSE). Also read [`NOTICE`](NOTICE) before use.
+
+
+## Local Web Panel (optional)
+
+Run a local control UI (binds `127.0.0.1` only):
+
+```bash
+pip install fastapi uvicorn
+python web_panel.py
+# open http://127.0.0.1:8787
+```
+
+Panel features:
+
+- YesCaptcha / EzSolver Turnstile backends
+- Tempmail multi-key round-robin with **per-key quota** (default 25 / 300s)
+- Global create-gate so concurrent workers do not burst `inbox/create` (reduces 429)
+- Auto-pacing from key count × quota (+ optional account interval / Turnstile retries)
+- CLIProxyAPI push: **local auth dir** and/or **remote management API** (`POST /v0/management/auth-files`)
+- Job list clear, account ZIP export, config persistence in `web_panel_config.json` (gitignored)
+
+Environment extras:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `TEMPMAIL_API_KEYS` | Multiple keys (newline/comma) | — |
+| `TEMPMAIL_RATE_LIMIT` | Creates per key per window | `25` |
+| `TEMPMAIL_RATE_WINDOW` | Window seconds | `300` |
+| `TEMPMAIL_AUTO_PACE` | Auto spacing / create-gate | `1` |
+| `ACCOUNT_INTERVAL` | Min gap between accounts | `0` |
+| `TURNSTILE_MAX_RETRIES` | Turnstile retry count | `2` |
+| `CPA_PUSH_MODE` | `local` / `remote` / `both` / `none` | `both` |
+| `CPA_MANAGEMENT_URL` | e.g. `http://127.0.0.1:8317/v0/management` | — |
+| `CPA_MANAGEMENT_KEY` | Management bearer key | — |
+| `PANEL_HOST` / `PANEL_PORT` | Panel bind | `127.0.0.1` / `8787` |
+

@@ -221,3 +221,21 @@ alias_mail/                 # Cloudflare alias mail helpers
 ## License
 
 [MIT](LICENSE)。使用前请同时阅读 [`NOTICE`](NOTICE)。
+
+
+## 本地 Web 面板（可选）
+
+```bash
+pip install fastapi uvicorn
+python web_panel.py
+# 打开 http://127.0.0.1:8787
+```
+
+功能概要：
+
+- YesCaptcha / EzSolver 双打码后端
+- Tempmail 多 key 轮询 + 每 key 配额（默认 25/300s）+ 全局创建闸门（降低并发 429）
+- 按 key 数量自动限速；账号间隔 / Turnstile 重试可配
+- CLIProxyAPI：本地 auth 目录 与/或 远程管理接口导入（默认 both）
+- 清空任务、账号 ZIP 导出；配置持久化到 `web_panel_config.json`（已 gitignore）
+

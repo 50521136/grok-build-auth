@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>grok-build-auth Panel</title>
+  <style>
+    :root {
+      --bg: #0f1218; --panel: #171b24; --panel2: #1d2330; --border: #2a3344;
+      --text: #e8edf7; --muted: #93a0b8; --accent: #3d8bfd; --accent2: #2f6fed;
+      --ok: #3ecf8e; --warn: #f0b429; --fail: #f07178;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 20px; border-bottom:1px solid var(--border); background:#12161f; position:sticky; top:0; z-index:10; }
+    header h1 { margin:0; font-size:16px; font-weight:650; }
+    header .sub { color:var(--muted); font-size:12px; margin-top:2px; }
+    .badge { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px; border:1px solid var(--border); background:var(--panel); font-size:12px; color:var(--muted); }
+    .dot { width:7px; height:7px; border-radius:50%; background:var(--warn); }
+    .dot.ok { background:var(--ok); } .dot.fail { background:var(--fail); }
+    main { display:grid; grid-template-columns:380px 1fr; gap:16px; padding:16px; max-width:1480px; margin:0 auto; }
+    @media (max-width:980px){ main{grid-template-columns:1fr;} }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:14px; }
+    .card h2 { margin:0 0 12px; font-size:13px; font-weight:650; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; }
+    label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+    input, select, textarea, button { font:inherit; }
+    input, select, textarea { width:100%; background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:8px 10px; outline:none; }
+    textarea { min-height:72px; resize:vertical; font-family:var(--mono); font-size:12px; }
+    input:focus, select:focus, textarea:focus { border-color:var(--accent); }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .checks { display:flex; flex-wrap:wrap; gap:12px 16px; margin-top:12px; font-size:13px; }
+    .checks label { display:flex; align-items:center; gap:6px; margin:0; color:var(--text); cursor:pointer; }
+    .checks input { width:auto; }
+    .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+    button { border:1px solid var(--border); background:var(--panel2); color:var(--text); border-radius:6px; padding:8px 12px; cursor:pointer; }
+    button:hover { border-color:#3b465c; }
+    button.primary { background:var(--accent2); border-color:var(--accent2); color:white; font-weight:600; }
+    button.primary:hover { background:var(--accent); }
+    button.danger { color:#ffd0d3; border-color:#5a3036; background:#2a171a; }
+    button:disabled { opacity:0.5; cursor:not-allowed; }
+    .stack { display:grid; gap:16px; }
+    .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px; }
+    .stat { background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:10px; }
+    .stat .k { font-size:11px; color:var(--muted); }
+    .stat .v { font-size:18px; font-weight:700; margin-top:2px; font-variant-numeric:tabular-nums; }
+    .job-list, .acct-list { display:grid; gap:8px; max-height:280px; overflow:auto; }
+    .job-item, .acct-item { display:grid; grid-template-columns:1fr auto; gap:8px; padding:10px; border:1px solid var(--border); border-radius:6px; background:var(--panel2); cursor:pointer; }
+    .job-item.active, .acct-item:hover { border-color:var(--accent); }
+    .job-item .title, .acct-item .title { font-size:13px; font-weight:600; }
+    .job-item .meta, .acct-item .meta { font-size:11px; color:var(--muted); margin-top:3px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid var(--border); font-size:11px; text-transform:uppercase; }
+    .pill.queued, .pill.pending { color:var(--muted); }
+    .pill.running { color:var(--warn); border-color:#6a5420; }
+    .pill.done, .pill.ok { color:var(--ok); border-color:#275c45; }
+    .pill.fail, .pill.error, .pill.cancelled { color:var(--fail); border-color:#6a3036; }
+    .log { font-family:var(--mono); font-size:12px; line-height:1.45; background:#0c0f15; border:1px solid var(--border); border-radius:6px; padding:10px; height:280px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--border); vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    td.mono { font-family:var(--mono); }
+    .muted { color:var(--muted); } .err { color:var(--fail); } .okc { color:var(--ok); }
+    .toast { position:fixed; right:16px; bottom:16px; background:#1b2433; border:1px solid var(--border); color:var(--text); padding:10px 14px; border-radius:8px; font-size:13px; max-width:360px; display:none; z-index:20; }
+    .hint { font-size:11px; color:var(--muted); margin-top:8px; line-height:1.4; }
+    .section-divider { border-top:1px dashed var(--border); margin:14px 0 4px; padding-top:6px; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; }
+  
+    .item-toolbar {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      margin: 12px 0 8px;
+    }
+    .item-toolbar select, .item-toolbar input {
+      width: auto; min-width: 0;
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+    .item-toolbar .spacer { flex: 1; }
+    .item-toolbar .meta { font-size: 12px; color: var(--muted); }
+    .item-table-wrap {
+      margin-top: 0;
+      overflow: auto;
+      max-height: 360px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .item-table-wrap table { margin: 0; }
+    .item-table-wrap thead th {
+      position: sticky; top: 0;
+      background: var(--panel2);
+      z-index: 1;
+    }
+</style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>grok-build-auth Panel</h1>
+      <div class="sub">本地控制台 · v0.2 · 127.0.0.1 only</div>
+    </div>
+    <div class="badge" id="healthBadge"><span class="dot" id="healthDot"></span><span id="healthText">connecting…</span></div>
+  </header>
+  <main>
+    <section class="stack">
+      <div class="card">
+        <h2>配置</h2>
+        <label>Turnstile Solver</label>
+        <select id="cfgSolver">
+          <option value="yescaptcha">yescaptcha</option>
+          <option value="ezsolver">ezsolver</option>
+        </select>
+        <label>YesCaptcha API Key</label>
+        <input id="cfgYesKey" type="password" placeholder="留空则保留当前值" autocomplete="off" />
+        <label>EzSolver Endpoint</label>
+        <input id="cfgEzEp" placeholder="http://127.0.0.1:8191" />
+        <div class="row">
+          <div><label>EzSolver Timeout</label><input id="cfgEzTo" placeholder="120" /></div>
+          <div><label>HTTPS Proxy</label><input id="cfgProxy" placeholder="http://127.0.0.1:7890" /></div>
+        </div>
+        <div class="section-divider">Tempmail Multi-Key</div>
+        <label>Tempmail API Keys (每行一个 / 逗号分隔)</label>
+        <textarea id="cfgTmKeys" placeholder="key1
+key2
+key3"></textarea>
+        <div class="row">
+          <div><label>收信轮询间隔 (秒)</label><input id="cfgTmPoll" type="number" min="0.5" step="0.5" value="3" /></div>
+          <div><label>Key 轮询间隔 (秒)</label><input id="cfgTmRotate" type="number" min="0" step="0.5" value="0" /></div>
+        </div>
+        <div class="row">
+          <div><label>每Key限额</label><input id="cfgTmRateLimit" type="number" min="1" step="1" value="25" title="每个 key 在窗口内最多创建邮箱数" /></div>
+          <div><label>限额窗口(秒)</label><input id="cfgTmRateWindow" type="number" min="30" step="1" value="300" title="默认 300=5分钟" /></div>
+        </div>
+        <div class="row">
+          <div><label>账号间隔 (秒)</label><input id="cfgAcctInterval" type="number" min="0" step="0.5" value="5" /></div>
+          <div><label>Turnstile 重试次数</label><input id="cfgTsRetries" type="number" min="0" max="10" step="1" value="2" /></div>
+        </div>
+        <div class="checks" style="margin-top:8px;">
+          <label><input id="cfgTmAutoPace" type="checkbox" checked /> 自动限速（按 key 数×配额算间隔）</label>
+        </div>
+        <div class="hint" id="tmHint">账号间隔给 EzSolver 恢复时间；Turnstile 重试=失败后再试几次（默认2，共3次）。Key 轮询间隔=0 表示连续取 key。</div>
+        <div class="section-divider">CLIProxyAPI Push</div>
+        <label>推送方式</label>
+                        <select id="cfgCpaMode">
+          <option value="both" selected>both · 本地 + 远程</option>
+          <option value="local">local · 写本地 auth 目录</option>
+          <option value="remote">remote · CPA 管理接口导入</option>
+          <option value="none">none · 不推送</option>
+        </select>
+        <label>本地 auth 目录 (local)</label>
+        <input id="cfgAuthDir" />
+        <label>CPA Management URL (remote)</label>
+        <input id="cfgCpaUrl" placeholder="http://127.0.0.1:8317/v0/management" />
+        <label>CPA Management Key</label>
+        <input id="cfgCpaKey" type="password" placeholder="留空则保留当前值" autocomplete="off" />
+        <div class="actions">
+          <button class="primary" id="btnSaveCfg">保存到进程</button>
+          <button id="btnRefreshCfg">刷新</button>
+          <button id="btnSolverStatus">检测 Solver</button>
+          <button id="btnCpaTest">检测 CPA</button>
+        </div>
+        <div class="hint" id="cfgHint">配置只改当前面板进程环境变量，不会写回 .env。</div>
+      </div>
+      <div class="card">
+        <h2>新建任务</h2>
+        <div class="row">
+          <div><label>数量</label><input id="jobCount" type="number" min="1" max="500" value="1" /></div>
+          <div><label>并发</label><input id="jobThreads" type="number" min="1" max="10" value="1" /></div>
+        </div>
+        <label>邮箱后端</label>
+        <select id="jobEmail"><option value="tempmail">tempmail</option><option value="cloudflare">cloudflare</option></select>
+        <label>本任务 CPA 推送覆盖</label>
+        <select id="jobCpaMode">
+          <option value="">跟随全局配置</option>
+          <option value="local">local</option>
+          <option value="remote">remote</option>
+          <option value="both">both</option>
+          <option value="none">none</option>
+        </select>
+        <div class="checks">
+          <label><input id="jobOAuth" type="checkbox" checked /> 执行 OAuth / 导出 Build</label>
+          <label><input id="jobProtocol" type="checkbox" checked /> 协议 OAuth</label>
+          <label><input id="jobDebug" type="checkbox" /> OAuth debug</label>
+        </div>
+        <div class="actions">
+          <button class="primary" id="btnStart">启动任务</button>
+          <button class="danger" id="btnCancel" disabled>取消当前</button>
+        </div>
+        <div class="hint">任务复用 run.register_one；Tempmail 多 key 自动轮询；OAuth 默认串行锁。</div>
+      </div>
+    </section>
+    <section class="stack">
+      <div class="card">
+        <h2>当前任务</h2>
+        <div class="stats">
+          <div class="stat"><div class="k">状态</div><div class="v" id="stStatus">-</div></div>
+          <div class="stat"><div class="k">进度</div><div class="v" id="stProgress">0/0</div></div>
+          <div class="stat"><div class="k">成功</div><div class="v okc" id="stOk">0</div></div>
+          <div class="stat"><div class="k">失败</div><div class="v err" id="stFail">0</div></div>
+        </div>
+        <div class="log" id="logBox">等待任务…</div>
+        <div class="item-toolbar">
+          <select id="itemFilter" title="filter">
+            <option value="all">全部</option>
+            <option value="active">进行中</option>
+            <option value="ok">成功</option>
+            <option value="fail">失败</option>
+            <option value="pending">等待</option>
+          </select>
+          <select id="itemPageSize" title="page size">
+            <option value="20">每页 20</option>
+            <option value="50" selected>每页 50</option>
+            <option value="100">每页 100</option>
+            <option value="0">全部</option>
+          </select>
+          <input id="itemSearch" type="search" placeholder="搜索邮箱 / 错误" style="min-width:160px; flex:1;" />
+          <div class="meta" id="itemPageMeta">0 条</div>
+          <button id="btnItemPrev" type="button">上一页</button>
+          <button id="btnItemNext" type="button">下一页</button>
+        </div>
+        <div class="item-table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>状态</th><th>邮箱</th><th>SSO</th><th>Build</th><th>CPA远程</th><th>错误</th></tr></thead>
+            <tbody id="itemBody"><tr><td colspan="7" class="muted">无条目</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>任务列表</h2>
+        <div class="actions" style="margin-top:0; margin-bottom:10px;">
+          <button id="btnClearFinished">清空已完成</button>
+          <button id="btnClearFailed">清空失败</button>
+          <button class="danger" id="btnClearAll">清空全部(保留运行中)</button>
+        </div>
+        <div class="job-list" id="jobList"><div class="muted">暂无</div></div>
+      </div>
+      <div class="card">
+        <h2>账号 / 导出</h2>
+        <div class="actions" style="margin-top:0; margin-bottom:10px;">
+          <button class="primary" id="btnExportZip">导出账号 ZIP</button>
+          <button id="btnExportFull">导出完整包(+sso/oauth)</button>
+          <button id="btnRefreshAcct">刷新</button>
+        </div>
+        <div class="hint">ZIP 含 accounts/ 与 cliproxyapi_auth/；完整包额外含 sso_output、oauth_output。</div>
+        <div class="acct-list" id="acctList" style="margin-top:10px;"><div class="muted">暂无</div></div>
+      </div>
+    </section>
+  </main>
+  <div class="toast" id="toast"></div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let currentJobId = null;
+    let pollTimer = null;
+    let logOffset = 0;
+    let itemPage = 0;
+    let lastJobItems = [];
+    let itemViewBound = false;
+
+    function toast(msg) {
+      const el = $("toast");
+      el.textContent = msg;
+      el.style.display = "block";
+      clearTimeout(el._t);
+      el._t = setTimeout(() => { el.style.display = "none"; }, 3200);
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+        ...opts,
+      });
+      let data = null;
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("application/json")) {
+        try { data = await res.json(); } catch { data = null; }
+      } else if (!ct.includes("application/zip")) {
+        try { data = await res.json(); } catch { data = null; }
+      }
+      if (!res.ok) {
+        const detail = data && (data.detail || data.error) || res.statusText;
+        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      }
+      return data;
+    }
+
+    function setHealth(ok, text) {
+      $("healthDot").className = "dot " + (ok ? "ok" : "fail");
+      $("healthText").textContent = text;
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    async function loadConfig() {
+      const cfg = await api("/api/config");
+      $("cfgSolver").value = cfg.turnstile_solver || "yescaptcha";
+      $("cfgEzEp").value = cfg.ezsolver_endpoint || "";
+      $("cfgEzTo").value = cfg.ezsolver_timeout || "120";
+      $("cfgProxy").value = cfg.https_proxy || "";
+      $("cfgAuthDir").value = cfg.cliproxyapi_auth_dir || "";
+      $("cfgCpaMode").value = cfg.cpa_push_mode || "both";
+      $("cfgCpaUrl").value = cfg.cpa_management_url || "";
+      $("cfgTmPoll").value = cfg.tempmail_poll_interval || "3";
+      $("cfgTmRotate").value = cfg.tempmail_key_rotate_interval || "0";
+      $("cfgAcctInterval").value = cfg.account_interval || "0";
+      $("cfgTsRetries").value = cfg.turnstile_max_retries || "2";
+      if ($("cfgTmRateLimit")) $("cfgTmRateLimit").value = cfg.tempmail_rate_limit || "25";
+      if ($("cfgTmRateWindow")) $("cfgTmRateWindow").value = cfg.tempmail_rate_window || "300";
+      if ($("cfgTmAutoPace")) $("cfgTmAutoPace").checked = cfg.tempmail_auto_pace !== false;
+      // refill secrets so refresh keeps form values (local-only panel)
+      $("cfgYesKey").value = cfg.yescaptcha_api_key || "";
+      $("cfgYesKey").placeholder = cfg.yescaptcha_api_key_set
+        ? `??? ${cfg.yescaptcha_api_key_masked}` : "???";
+      $("cfgCpaKey").value = cfg.cpa_management_key || "";
+      $("cfgCpaKey").placeholder = cfg.cpa_management_key_set
+        ? `??? ${cfg.cpa_management_key_masked}` : "???";
+      $("cfgTmKeys").value = cfg.tempmail_api_keys || "";
+      const n = cfg.tempmail_api_keys_count || 0;
+      const cap = cfg.tempmail_capacity || {};
+      const capTxt = (cap.keys != null)
+        ? `容量≈${cap.capacity_per_window||0}/窗口(${cap.rate_window||300}s) · ~${cap.per_minute||0}/分 · 建议间隔≥${cap.suggested_account_interval||0}s`
+        : "";
+      $("tmHint").textContent = n
+        ? `已加载 ${n} 个 key · ${capTxt}`
+        : "尚未配置 Tempmail key（可在上方粘贴多个）。";
+      $("cfgTmKeys").placeholder = n
+        ? `已设置 ${n} 个 key（${(cfg.tempmail_api_keys_masked || []).join(", ")}）`
+        : "key1\nkey2\nkey3";
+      const persist = cfg.config_persisted
+        ? `已持久化 → ${cfg.config_path || "web_panel_config.json"}`
+        : "尚未持久化（点「保存到进程」会写入本地配置文件）";
+      $("cfgHint").textContent = cfg.solver_config_error
+        ? `Solver 配置问题: ${cfg.solver_config_error}`
+        : `workdir: ${cfg.workdir} · ${persist}`;
+      return cfg;
+    }
+
+    async function saveConfig() {
+      const body = {
+        turnstile_solver: $("cfgSolver").value,
+        ezsolver_endpoint: $("cfgEzEp").value,
+        ezsolver_timeout: $("cfgEzTo").value,
+        https_proxy: $("cfgProxy").value,
+        cliproxyapi_auth_dir: $("cfgAuthDir").value,
+        cpa_push_mode: $("cfgCpaMode").value,
+        cpa_management_url: $("cfgCpaUrl").value,
+        tempmail_poll_interval: $("cfgTmPoll").value,
+        tempmail_key_rotate_interval: $("cfgTmRotate").value,
+        account_interval: $("cfgAcctInterval").value,
+        turnstile_max_retries: $("cfgTsRetries").value,
+        tempmail_rate_limit: $("cfgTmRateLimit") ? $("cfgTmRateLimit").value : "25",
+        tempmail_rate_window: $("cfgTmRateWindow") ? $("cfgTmRateWindow").value : "300",
+        tempmail_auto_pace: $("cfgTmAutoPace") ? $("cfgTmAutoPace").checked : true,
+      };
+      if ($("cfgYesKey").value.trim()) body.yescaptcha_api_key = $("cfgYesKey").value.trim();
+      if ($("cfgCpaKey").value.trim()) body.cpa_management_key = $("cfgCpaKey").value.trim();
+      if ($("cfgTmKeys").value.trim()) body.tempmail_api_keys = $("cfgTmKeys").value.trim();
+      await api("/api/config", { method: "POST", body: JSON.stringify(body) });
+      await loadConfig();
+      toast("配置已保存（进程 + 本地文件）");
+    }
+
+    async function checkSolver() {
+      const st = await api("/api/solver/status");
+      if (st.config_error) { toast(`Solver: ${st.config_error}`); return; }
+      if (st.provider === "ezsolver") {
+        const ez = st.ezsolver || {};
+        toast(ez.ok ? `EzSolver 可达 ${ez.url} (${ez.status_code})` : `EzSolver 不可达: ${ez.error || "fail"}`);
+      } else {
+        toast(`YesCaptcha key ${st.yescaptcha && st.yescaptcha.api_key_set ? "已配置" : "未配置"}`);
+      }
+    }
+
+    async function checkCpa() {
+      const st = await api("/api/cpa/test", { method: "POST", body: "{}" });
+      if (st.ok) toast(`CPA 可达 HTTP ${st.status_code}`);
+      else toast(`CPA 失败: ${st.error || st.status_code || "unknown"} ${st.body || ""}`.slice(0, 180));
+    }
+
+    function renderJobs(jobs) {
+      const box = $("jobList");
+      if (!jobs.length) { box.innerHTML = '<div class="muted">暂无</div>'; return; }
+      box.innerHTML = jobs.map(j => {
+        const active = j.id === currentJobId ? "active" : "";
+        const t = new Date((j.created_at || 0) * 1000).toLocaleTimeString();
+        return `<div class="job-item ${active}" data-id="${j.id}">
+          <div>
+            <div class="title">${j.id} <span class="pill ${j.status}">${j.status}</span></div>
+            <div class="meta">${t} · ${j.done||0}/${j.total||0} · ok ${j.ok||0} / fail ${j.fail||0} · cpa ${(j.params&&j.params.cpa_push_mode)||"-"}</div>
+          </div>
+        </div>`;
+      }).join("");
+      box.querySelectorAll(".job-item").forEach(el => { el.onclick = () => selectJob(el.dataset.id); });
+    }
+
+    function renderAccounts(items) {
+      const box = $("acctList");
+      if (!items.length) { box.innerHTML = '<div class="muted">暂无</div>'; return; }
+      box.innerHTML = items.map(a => {
+        const t = new Date((a.mtime || 0) * 1000).toLocaleString();
+        return `<div class="acct-item" data-name="${escapeHtml(a.name)}">
+          <div>
+            <div class="title mono">${escapeHtml(a.email || a.name)}</div>
+            <div class="meta">${t} · sso ${a.has_sso ? "yes" : "no"} · build ${a.has_build ? "yes" : "no"}</div>
+          </div>
+          <a class="muted" href="/api/accounts/${encodeURIComponent(a.name)}" download>json</a>
+        </div>`;
+      }).join("");
+    }
+
+    function remotePill(st) {
+      if (!st || st === "n/a") return `<span class="muted">-</span>`;
+      if (st === "ok") return `<span class="okc">ok</span>`;
+      if (st === "skipped") return `<span class="muted">skip</span>`;
+      if (st === "fail") return `<span class="err">fail</span>`;
+      return escapeHtml(st);
+    }
+
+    function renderJobDetail(job) {
+      if (!job) return;
+      $("stStatus").textContent = job.status || "-";
+      $("stProgress").textContent = `${job.done || 0}/${job.total || 0}`;
+      $("stOk").textContent = job.ok || 0;
+      $("stFail").textContent = job.fail || 0;
+      $("btnCancel").disabled = !(job.status === "running" || job.status === "queued");
+      if (Array.isArray(job.logs)) {
+        const text = job.logs.join("\n");
+        if (logOffset === 0 || job.logs.length >= 50) $("logBox").textContent = text || "…";
+        else if (job.logs.length) $("logBox").textContent = ($("logBox").textContent + "\n" + text).trim();
+        if (job.log_offset != null) logOffset = job.log_offset;
+        $("logBox").scrollTop = $("logBox").scrollHeight;
+      }
+      lastJobItems = Array.isArray(job.items) ? job.items : [];
+      // keep page if possible when polling same job
+      renderItems();
+    }
+
+    function filteredItems() {
+      const filter = ($("itemFilter") && $("itemFilter").value) || "all";
+      const q = (($("itemSearch") && $("itemSearch").value) || "").trim().toLowerCase();
+      let items = lastJobItems.slice();
+      if (filter === "active") {
+        items = items.filter(it => it.status === "running" || it.status === "pending" || it.status === "queued");
+      } else if (filter === "ok") {
+        items = items.filter(it => it.status === "ok" || it.status === "done");
+      } else if (filter === "fail") {
+        items = items.filter(it => it.status === "fail" || it.status === "error" || it.status === "cancelled");
+      } else if (filter === "pending") {
+        items = items.filter(it => it.status === "pending");
+      }
+      if (q) {
+        items = items.filter(it => {
+          const err = [it.error, it.cpa_remote_error].filter(Boolean).join(" ");
+          return String(it.email || "").toLowerCase().includes(q)
+            || String(err || "").toLowerCase().includes(q)
+            || String(it.index || "").includes(q);
+        });
+      }
+      return items;
+    }
+
+    function renderItems() {
+      const body = $("itemBody");
+      if (!body) return;
+      const items = filteredItems();
+      const sizeRaw = ($("itemPageSize") && $("itemPageSize").value) || "50";
+      const pageSize = Number(sizeRaw) || 0; // 0 = all
+      const total = items.length;
+      const pages = pageSize > 0 ? Math.max(1, Math.ceil(total / pageSize) || 1) : 1;
+      if (itemPage >= pages) itemPage = Math.max(0, pages - 1);
+      if (itemPage < 0) itemPage = 0;
+      const start = pageSize > 0 ? itemPage * pageSize : 0;
+      const end = pageSize > 0 ? Math.min(total, start + pageSize) : total;
+      const pageItems = items.slice(start, end);
+
+      if ($("itemPageMeta")) {
+        if (!total) $("itemPageMeta").textContent = "0 条";
+        else if (pageSize > 0) $("itemPageMeta").textContent = `${start + 1}-${end} / ${total} 条 · 第 ${itemPage + 1}/${pages} 页`;
+        else $("itemPageMeta").textContent = `${total} 条`;
+      }
+      if ($("btnItemPrev")) $("btnItemPrev").disabled = pageSize <= 0 || itemPage <= 0;
+      if ($("btnItemNext")) $("btnItemNext").disabled = pageSize <= 0 || itemPage >= pages - 1;
+
+      if (!pageItems.length) {
+        body.innerHTML = '<tr><td colspan="7" class="muted">无条目</td></tr>';
+        return;
+      }
+      body.innerHTML = pageItems.map(it => {
+        const sso = it.sso ? `<span class="okc">yes</span>` : `<span class="muted">no</span>`;
+        const build = it.cliproxyapi_auth ? `<span class="okc">yes</span>` : `<span class="muted">no</span>`;
+        const err = [it.error, it.cpa_remote_error].filter(Boolean).join(" | ");
+        return `<tr>
+          <td>${it.index}</td>
+          <td><span class="pill ${it.status}">${it.status}</span></td>
+          <td class="mono">${escapeHtml(it.email || "")}</td>
+          <td>${sso}</td>
+          <td>${build}</td>
+          <td>${remotePill(it.cpa_remote_status)}</td>
+          <td class="err">${escapeHtml(err || "")}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function bindItemViewControls() {
+      if (itemViewBound) return;
+      itemViewBound = true;
+      const resetPage = () => { itemPage = 0; renderItems(); };
+      if ($("itemFilter")) $("itemFilter").onchange = resetPage;
+      if ($("itemPageSize")) $("itemPageSize").onchange = resetPage;
+      if ($("itemSearch")) {
+        let tmr = null;
+        $("itemSearch").oninput = () => {
+          clearTimeout(tmr);
+          tmr = setTimeout(resetPage, 200);
+        };
+      }
+      if ($("btnItemPrev")) $("btnItemPrev").onclick = () => { itemPage -= 1; renderItems(); };
+      if ($("btnItemNext")) $("btnItemNext").onclick = () => { itemPage += 1; renderItems(); };
+    }
+
+    async function selectJob(id) {
+      currentJobId = id; logOffset = 0; itemPage = 0; $("logBox").textContent = "加载中…";
+      await refreshJob(true); await refreshJobs();
+    }
+
+    async function refreshJobs() {
+      const data = await api("/api/jobs");
+      renderJobs(data.jobs || []);
+      if (!currentJobId && data.jobs && data.jobs.length) currentJobId = data.jobs[0].id;
+    }
+
+    async function refreshAccounts() {
+      const data = await api("/api/accounts");
+      renderAccounts(data.items || []);
+    }
+
+    async function refreshJob(full = false) {
+      if (!currentJobId) return null;
+      const q = full ? "" : `?logs_from=${logOffset}`;
+      const job = await api(`/api/jobs/${currentJobId}${q}`);
+      if (full) {
+        logOffset = 0;
+        $("logBox").textContent = (job.logs || []).join("\n") || "…";
+        logOffset = job.log_offset || (job.logs || []).length;
+      }
+      renderJobDetail(job);
+      return job;
+    }
+
+    async function startJob() {
+      const body = {
+        count: Number($("jobCount").value || 1),
+        threads: Number($("jobThreads").value || 1),
+        email_backend: $("jobEmail").value,
+        do_oauth: $("jobOAuth").checked,
+        oauth_protocol: $("jobProtocol").checked,
+        oauth_debug: $("jobDebug").checked,
+        solver_provider: $("cfgSolver").value,
+        proxy: $("cfgProxy").value,
+        cliproxyapi_auth_dir: $("cfgAuthDir").value,
+        ezsolver_endpoint: $("cfgEzEp").value,
+        ezsolver_timeout: $("cfgEzTo").value ? Number($("cfgEzTo").value) : null,
+        tempmail_poll_interval: Number($("cfgTmPoll").value || 3),
+        tempmail_key_rotate_interval: Number($("cfgTmRotate").value || 0),
+        account_interval: Number($("cfgAcctInterval").value || 0),
+        turnstile_max_retries: Number($("cfgTsRetries").value || 2),
+        tempmail_rate_limit: Number(($("cfgTmRateLimit") && $("cfgTmRateLimit").value) || 25),
+        tempmail_rate_window: Number(($("cfgTmRateWindow") && $("cfgTmRateWindow").value) || 300),
+        tempmail_auto_pace: $("cfgTmAutoPace") ? $("cfgTmAutoPace").checked : true,
+        cpa_management_url: $("cfgCpaUrl").value,
+      };
+      body.cpa_push_mode = $("jobCpaMode").value || $("cfgCpaMode").value || "both";
+      if ($("cfgYesKey").value.trim()) body.yescaptcha_api_key = $("cfgYesKey").value.trim();
+      if ($("cfgCpaKey").value.trim()) body.cpa_management_key = $("cfgCpaKey").value.trim();
+      if ($("cfgTmKeys").value.trim()) body.tempmail_api_keys = $("cfgTmKeys").value.trim();
+      const job = await api("/api/jobs", { method: "POST", body: JSON.stringify(body) });
+      currentJobId = job.id; logOffset = 0;
+      toast(`任务已创建 ${job.id}`);
+      await refreshJobs(); renderJobDetail(job);
+    }
+
+    async function cancelJob() {
+      if (!currentJobId) return;
+      await api(`/api/jobs/${currentJobId}/cancel`, { method: "POST", body: "{}" });
+      toast("已请求取消");
+      await refreshJob(true);
+    }
+
+    async function clearJobs(mode) {
+      const r = await api("/api/jobs/clear", { method: "POST", body: JSON.stringify({ mode }) });
+      const jobs = (await api("/api/jobs")).jobs || [];
+      if (currentJobId && !jobs.find(j => j.id === currentJobId)) {
+        currentJobId = jobs[0] ? jobs[0].id : null;
+        logOffset = 0;
+        $("logBox").textContent = currentJobId ? "加载中…" : "等待任务…";
+        if (currentJobId) await refreshJob(true);
+        else renderJobDetail({ status: "-", done: 0, total: 0, ok: 0, fail: 0, items: [], logs: [] });
+      }
+      toast(`已清空 ${r.removed} 个任务（保留 ${r.kept}）`);
+      await refreshJobs();
+    }
+
+    async function exportZip(full = false) {
+      const q = full
+        ? "?include_auth=true&include_sso=true&include_oauth=true"
+        : "?include_auth=true&include_sso=false&include_oauth=false";
+      const res = await fetch(`/api/accounts/export.zip${q}`);
+      if (!res.ok) {
+        let detail = res.statusText;
+        try { const j = await res.json(); detail = j.detail || detail; } catch {}
+        throw new Error(detail);
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      let name = "grok-accounts.zip";
+      const m = /filename="?([^";]+)"?/.exec(cd);
+      if (m) name = m[1];
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+      const n = res.headers.get("X-Export-Files") || "?";
+      toast(`已导出 ZIP（${n} 个条目）`);
+    }
+
+    async function tick() {
+      try {
+        const h = await api("/api/health");
+        setHealth(true, `panel online v${h.version || "?"}`);
+        await refreshJobs();
+        if (currentJobId) await refreshJob(false);
+        await refreshAccounts();
+      } catch (e) {
+        setHealth(false, String(e.message || e));
+      }
+    }
+
+    $("btnSaveCfg").onclick = () => saveConfig().catch(e => toast(e.message));
+    $("btnRefreshCfg").onclick = () => loadConfig().catch(e => toast(e.message));
+    $("btnSolverStatus").onclick = () => checkSolver().catch(e => toast(e.message));
+    $("btnCpaTest").onclick = () => checkCpa().catch(e => toast(e.message));
+    $("btnStart").onclick = () => startJob().catch(e => toast(e.message));
+    $("btnCancel").onclick = () => cancelJob().catch(e => toast(e.message));
+    $("btnClearFinished").onclick = () => clearJobs("finished").catch(e => toast(e.message));
+    $("btnClearFailed").onclick = () => clearJobs("failed").catch(e => toast(e.message));
+    $("btnClearAll").onclick = () => clearJobs("all").catch(e => toast(e.message));
+    $("btnExportZip").onclick = () => exportZip(false).catch(e => toast(e.message));
+    $("btnExportFull").onclick = () => exportZip(true).catch(e => toast(e.message));
+    $("btnRefreshAcct").onclick = () => refreshAccounts().catch(e => toast(e.message));
+
+    (async () => {
+      try {
+        await loadConfig();
+        await tick();
+        pollTimer = setInterval(tick, 2000);
+      } catch (e) {
+        setHealth(false, String(e.message || e));
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -43,3 +43,15 @@ Thumbs.db
 # local reference clone
 EzSolver-ref/
 
+
+# Local web panel runtime (secrets)
+web_panel_config.json
+web_jobs/
+
+# local misc
+image_web/tmp/
+image_web/*.log
+
+
+_push_bak/
+

@@ -50,30 +50,46 @@ class TempmailInbox:
         return {"Authorization": f"Bearer {self.api_key}"}
 
     def create(self) -> str:
-        """Create a new inbox. Returns the email address."""
+        """Create a new inbox. Returns the email address.
+
+        Retries on HTTP 429 / 5xx with exponential backoff (common under concurrency).
+        """
         if self._created:
             raise RuntimeError("Inbox already created")
 
-        resp = requests.post(
-            f"{self.base_url}/v2/inbox/create",
-            headers=self._auth_headers(),
-            json={"prefix": self.prefix},
-            timeout=15,
-        )
-        if resp.status_code != 201:
-            raise RuntimeError(
-                f"Tempmail.lol create inbox failed: {resp.status_code} {resp.text[:300]}"
+        last_err = ""
+        for attempt in range(1, 6):
+            resp = requests.post(
+                f"{self.base_url}/v2/inbox/create",
+                headers=self._auth_headers(),
+                json={"prefix": self.prefix},
+                timeout=15,
             )
+            if resp.status_code == 201:
+                data = resp.json()
+                self.address = data["address"]
+                self.token = data["token"]
+                self._created = True
+                if self.debug:
+                    print(f"  [Tempmail] inbox created: {self.address}")
+                return self.address
 
-        data = resp.json()
-        self.address = data["address"]
-        self.token = data["token"]
-        self._created = True
+            last_err = f"{resp.status_code} {resp.text[:300]}"
+            # retry rate-limit / transient errors
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < 5:
+                # honor Retry-After when present
+                ra = resp.headers.get("Retry-After")
+                try:
+                    delay = float(ra) if ra else min(2.0 * attempt, 15.0)
+                except Exception:
+                    delay = min(2.0 * attempt, 15.0)
+                if self.debug:
+                    print(f"  [Tempmail] create {resp.status_code}, retry {attempt}/5 sleep {delay}s")
+                time.sleep(delay)
+                continue
+            break
 
-        if self.debug:
-            print(f"  [Tempmail] inbox created: {self.address}")
-
-        return self.address
+        raise RuntimeError(f"Tempmail.lol create inbox failed: {last_err}")
 
     def get_emails(self) -> list[dict]:
         """Fetch all emails currently in the inbox."""
