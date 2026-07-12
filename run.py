@@ -189,6 +189,16 @@ def tempmail_capacity_info(threads: int = 1) -> dict:
     }
 
 
+
+def _purge_tempmail_usage(key: str, now: float) -> list[float]:
+    """Drop timestamps outside the sliding rate window for a key."""
+    window = max(1.0, float(TEMPMAIL_RATE_WINDOW or 300))
+    arr = _tempmail_usage.get(key) or []
+    arr = [ts for ts in arr if (now - ts) < window]
+    _tempmail_usage[key] = arr
+    return arr
+
+
 def _tempmail_key_wait(key: str, now: float) -> float:
     """Seconds until this key can accept another create (0 if ready)."""
     cd = float(_tempmail_key_cooldown.get(key) or 0.0)
