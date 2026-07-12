@@ -25,7 +25,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 _ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
@@ -793,7 +793,7 @@ class ConfigUpdate(BaseModel):
     turnstile_max_retries: Optional[str] = None
     tempmail_rate_limit: Optional[str] = None
     tempmail_rate_window: Optional[str] = None
-    tempmail_auto_pace: Optional[str] = None
+    tempmail_auto_pace: Optional[Union[str, bool]] = None
 
 
 class ClearJobsBody(BaseModel):
