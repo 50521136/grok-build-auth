@@ -8,8 +8,8 @@ performs TLS+HTTP2+header-order impersonation of a real browser at the libcurl
 level (no headless browser required), and lets us match the captured Chrome
 148 / Windows fingerprint.
 
-The default impersonate target is `chrome131` (closest stable preset available
-in `curl_cffi 0.15.0`). The visible User-Agent and most other surface headers
+The default impersonate target is resolved at runtime from installed curl_cffi
+presets (prefers chrome146?, falls back to chrome131/chrome120/?). The visible User-Agent and most other surface headers
 still come from `xconsole_client.config` so they stay exactly consistent with
 the original capture.
 
@@ -31,9 +31,104 @@ except Exception:  # pragma: no cover
     _HAS_CURL_CFFI = False
 
 
-# Defaults that match the captured Chrome 148 / Windows profile.
-DEFAULT_IMPERSONATE = "chrome131"
-DEFAULT_HTTP_VERSION = "v2"  # curl_cffi: "v2" or "v3" — accounts.x.ai serves HTTP/2
+# Defaults that match a recent Chrome / Windows profile.
+# Prefer a modern preset when available; fall back for older curl_cffi builds.
+_PREFERRED_IMPERSONATES = (
+    "chrome146",
+    "chrome145",
+    "chrome142",
+    "chrome136",
+    "chrome133a",
+    "chrome131",
+    "chrome124",
+    "chrome123",
+    "chrome120",
+    "chrome119",
+    "chrome116",
+    "chrome110",
+    "chrome107",
+    "chrome104",
+    "chrome101",
+    "chrome100",
+    "chrome99",
+    "edge101",
+    "edge99",
+)
+
+
+def _available_impersonates() -> list[str]:
+    """Return impersonate targets supported by the installed curl_cffi."""
+    names: list[str] = []
+    try:
+        from curl_cffi.requests.impersonate import BrowserType  # type: ignore
+
+        for item in BrowserType:
+            try:
+                names.append(item.value if hasattr(item, "value") else str(item))
+            except Exception:
+                names.append(str(item).split(".")[-1])
+    except Exception:
+        # Older builds / incomplete installs: try BrowserType members.
+        try:
+            from curl_cffi.requests import BrowserType  # type: ignore
+
+            for k, v in vars(BrowserType).items():
+                if k.startswith("_"):
+                    continue
+                if isinstance(v, str) and (k.startswith("chrome") or k.startswith("edge") or k.startswith("firefox")):
+                    names.append(v)
+                elif k.startswith("chrome") or k.startswith("edge") or k.startswith("firefox"):
+                    names.append(k)
+        except Exception:
+            pass
+    # normalize unique
+    out: list[str] = []
+    seen = set()
+    for n in names:
+        s = str(n).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def resolve_impersonate(preferred: Optional[str] = None) -> str:
+    """Pick a curl_cffi impersonate target that exists on this install.
+
+    Raises RuntimeError with a clear message if none of the known targets work.
+    """
+    available = _available_impersonates()
+    avail_set = set(available)
+
+    candidates: list[str] = []
+    if preferred:
+        candidates.append(str(preferred).strip())
+    candidates.extend(_PREFERRED_IMPERSONATES)
+
+    for c in candidates:
+        if not c:
+            continue
+        if not avail_set or c in avail_set:
+            # if we could not enumerate, try preferred first then common list
+            return c
+
+    # last resort: first available chrome*
+    for a in available:
+        if a.startswith("chrome") or a.startswith("edge"):
+            return a
+    if available:
+        return available[0]
+
+    raise RuntimeError(
+        "No usable curl_cffi impersonate target found. "
+        "Upgrade curl_cffi (pip install -U curl_cffi) or set impersonate= to a "
+        "target supported by your build."
+    )
+
+
+DEFAULT_IMPERSONATE = resolve_impersonate("chrome131")
+DEFAULT_HTTP_VERSION = "v2"  # curl_cffi: "v2" or "v3" ? accounts.x.ai serves HTTP/2
 DEFAULT_ACCEPT_ENCODING = "gzip, deflate, br, zstd"
 DEFAULT_JA3: Optional[str] = None  # let curl_cffi derive from impersonate target
 
@@ -62,17 +157,43 @@ class FingerprintTransport:
             raise RuntimeError(
                 "curl_cffi is not installed. Install with: pip install curl_cffi"
             )
-        self._impersonate = impersonate
+        # Resolve against installed curl_cffi so older servers without chrome131 still work.
+        resolved = resolve_impersonate(impersonate)
+        self._impersonate = resolved
         self._http_version = http_version
         self._timeout = timeout
         self._debug = debug
         # A new Session per client. The browser-equivalent fingerprint is
         # established by `impersonate=`; it is fixed for the session's life.
-        self._session = cc_requests.Session(
-            impersonate=impersonate,
-            http_version=http_version,
-            ja3=DEFAULT_JA3,
-        )
+        try:
+            self._session = cc_requests.Session(
+                impersonate=resolved,
+                http_version=http_version,
+                ja3=DEFAULT_JA3,
+            )
+        except Exception as exc:
+            # One more fallback pass: try other preferred targets if this build
+            # enumerates incompletely but rejects the chosen name.
+            last = exc
+            for alt in _PREFERRED_IMPERSONATES:
+                if alt == resolved:
+                    continue
+                try:
+                    self._session = cc_requests.Session(
+                        impersonate=alt,
+                        http_version=http_version,
+                        ja3=DEFAULT_JA3,
+                    )
+                    self._impersonate = alt
+                    last = None
+                    break
+                except Exception as e2:
+                    last = e2
+            if last is not None:
+                raise RuntimeError(
+                    f"curl_cffi impersonate failed (tried {resolved} and fallbacks): {last}. "
+                    f"Upgrade curl_cffi or set a supported impersonate target."
+                ) from last
         # Make sure default Accept-Encoding is exactly the Chrome order.
         self._session.headers["accept-encoding"] = accept_encoding
 

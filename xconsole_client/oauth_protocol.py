@@ -197,6 +197,11 @@ class ProtocolOAuthClient:
             from curl_cffi import requests as creq
         except ImportError as exc:
             raise RuntimeError("curl_cffi is required for protocol OAuth") from exc
+        try:
+            from xconsole_client.fingerprint import resolve_impersonate
+            impersonate = resolve_impersonate(impersonate)
+        except Exception:
+            pass
         kwargs: Dict[str, Any] = {"impersonate": impersonate}
         if proxy:
             kwargs["proxies"] = {"http": proxy, "https": proxy}
