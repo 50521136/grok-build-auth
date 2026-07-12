@@ -26,6 +26,7 @@ import uuid
 import json
 import base64
 import time
+import re
 import threading
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -71,6 +72,8 @@ _tempmail_key_lock = threading.Lock()
 _tempmail_key_idx = 0
 _tempmail_last_take = 0.0
 _tempmail_usage: dict[str, list[float]] = {}  # key -> create timestamps (sliding window)
+_tempmail_key_cooldown: dict[str, float] = {}  # key -> cooldown until ts
+_tempmail_global_cooldown_until = 0.0  # IP/global free-tier 429 cooldown
 
 # Shared runtime globals (must always exist for register_one / panel)
 SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
@@ -134,31 +137,47 @@ def tempmail_capacity_info(threads: int = 1) -> dict:
 
     Default: each key allows TEMPMAIL_RATE_LIMIT creates per TEMPMAIL_RATE_WINDOW seconds.
 
-    Important: concurrent workers can still *burst* creates unless a global create
-    gate spaces them. ``min_create_interval`` is the safe gap between any two
-    inbox creates (all threads share it).
+    Important: free Tempmail.lol often rate-limits by **IP** as well as by key.
+    30+ keys on one VPS do NOT give 30x create speed. We therefore cap effective
+    capacity by TEMPMAIL_IP_RATE_LIMIT (default 20 / window window).
     """
     keys = TEMPMAIL_KEYS or _refresh_tempmail_keys()
     n = max(0, len(keys))
     limit = max(1, int(TEMPMAIL_RATE_LIMIT or 25))
     window = max(1.0, float(TEMPMAIL_RATE_WINDOW or 300))
-    capacity = max(1, n * limit) if n else 1  # emails per window
+    capacity_keys = max(1, n * limit) if n else 1
     thr = max(1, int(threads or 1))
-    # base spacing to stay under aggregate quota
+
+    try:
+        ip_limit = int(float(os.environ.get("TEMPMAIL_IP_RATE_LIMIT") or 20))
+    except Exception:
+        ip_limit = 20
+    ip_limit = max(1, ip_limit)
+    capacity = min(capacity_keys, ip_limit)
+
     base = window / float(capacity)
-    # safety margin against burst/429 (tempmail is sensitive to parallel creates)
-    safety = 1.5
-    min_create_interval = max(0.5, base * safety)
-    # account_interval for serial loop; for parallel, create-gate dominates
-    suggested_account_interval = min_create_interval if thr <= 1 else min_create_interval
-    # recommended max threads: don't exceed key count (1 create per key at a time ideally)
-    suggested_threads = max(1, min(thr, n if n else 1, 5))
+    try:
+        safety = float(os.environ.get("TEMPMAIL_PACE_SAFETY") or 2.0)
+    except Exception:
+        safety = 2.0
+    safety = max(1.0, safety)
+    try:
+        floor = float(os.environ.get("TEMPMAIL_MIN_CREATE_GAP") or 2.5)
+    except Exception:
+        floor = 2.5
+    floor = max(0.5, floor)
+    min_create_interval = max(floor, base * safety)
+    suggested_account_interval = min_create_interval
+    # free IP limit: more than 2 concurrent creators usually just 429s
+    suggested_threads = max(1, min(thr, 2 if n else 1, 5))
     per_minute = (capacity / (window / 60.0)) / safety if window else 0.0
     return {
         "keys": n,
         "rate_limit": limit,
         "rate_window": window,
-        "capacity_per_window": n * limit,
+        "ip_rate_limit": ip_limit,
+        "capacity_per_window": capacity,
+        "capacity_keys_theory": capacity_keys,
         "per_minute": round(per_minute, 2),
         "min_interval": round(base, 3),
         "min_create_interval": round(min_create_interval, 3),
@@ -166,19 +185,15 @@ def tempmail_capacity_info(threads: int = 1) -> dict:
         "suggested_threads": suggested_threads,
         "threads": thr,
         "auto_pace": bool(TEMPMAIL_AUTO_PACE),
+        "note": "free Tempmail often rate-limits by IP; key count != linear capacity",
     }
-
-
-def _purge_tempmail_usage(key: str, now: float) -> list[float]:
-    window = max(1.0, float(TEMPMAIL_RATE_WINDOW or 300))
-    arr = _tempmail_usage.get(key) or []
-    arr = [ts for ts in arr if (now - ts) < window]
-    _tempmail_usage[key] = arr
-    return arr
 
 
 def _tempmail_key_wait(key: str, now: float) -> float:
     """Seconds until this key can accept another create (0 if ready)."""
+    cd = float(_tempmail_key_cooldown.get(key) or 0.0)
+    if cd > now:
+        return cd - now
     limit = max(1, int(TEMPMAIL_RATE_LIMIT or 25))
     window = max(1.0, float(TEMPMAIL_RATE_WINDOW or 300))
     arr = _purge_tempmail_usage(key, now)
@@ -231,13 +246,33 @@ def _refresh_tempmail_keys() -> list[str]:
     return keys
 
 
+
+def _note_tempmail_429(key: str = "", retry_after: float = 0.0) -> None:
+    """Record free-tier/IP 429 so subsequent creates cool down instead of failing in a row."""
+    global _tempmail_global_cooldown_until
+    now = time.time()
+    try:
+        default_cd = float(os.environ.get("TEMPMAIL_429_COOLDOWN") or 60)
+    except Exception:
+        default_cd = 60.0
+    default_cd = max(5.0, default_cd)
+    cd = max(default_cd, float(retry_after or 0.0))
+    with _tempmail_key_lock:
+        if key:
+            prev = float(_tempmail_key_cooldown.get(key) or 0.0)
+            _tempmail_key_cooldown[key] = max(prev, now + cd)
+        _tempmail_global_cooldown_until = max(float(_tempmail_global_cooldown_until or 0.0), now + cd)
+        if key:
+            _record_tempmail_take(key, now)
+
+
 def _take_tempmail_key() -> str:
     """Pick a tempmail key with round-robin + per-key quota + global create gate.
 
     Concurrent workers share one global create spacing so threads=5 cannot burst
     5 creates at t=0 (which triggers Tempmail 429).
     """
-    global _tempmail_key_idx, _tempmail_last_take
+    global _tempmail_key_idx, _tempmail_last_take, _tempmail_global_cooldown_until
     keys = TEMPMAIL_KEYS or _refresh_tempmail_keys()
     if not keys:
         raise RuntimeError("TEMPMAIL_API_KEY / TEMPMAIL_API_KEYS ???")
@@ -251,6 +286,10 @@ def _take_tempmail_key() -> str:
                 raise RuntimeError("TEMPMAIL_API_KEY / TEMPMAIL_API_KEYS ???")
 
             now = time.time()
+            # 0) global 429 cooldown (IP / free-tier)
+            gcool = float(_tempmail_global_cooldown_until or 0.0) - now
+            if gcool > 0:
+                wait_outside = max(wait_outside, gcool)
             # 1) global create gate (all threads)
             info = tempmail_capacity_info(threads=1)
             # user KEY_ROTATE_INTERVAL is a floor; auto-pace uses capacity spacing
@@ -307,16 +346,35 @@ def _log(i: int, msg: str):
 def _make_email_provider(backend: str):
     """Return (email, receiver) — receiver has .wait_for_code(timeout)."""
     if backend == "tempmail":
-        key = _take_tempmail_key()
         from xconsole_client.tempmail_transport import TempmailInbox
-        inbox = TempmailInbox(
-            api_key=key,
-            prefix="xai",
-            interval=float(TEMPMAIL_POLL_INTERVAL or 3),
-            debug=False,
-        )
-        email = inbox.create()
-        return email, inbox
+        last_err: Optional[Exception] = None
+        for attempt in range(1, 6):
+            key = _take_tempmail_key()
+            inbox = TempmailInbox(
+                api_key=key,
+                prefix="xai",
+                interval=float(TEMPMAIL_POLL_INTERVAL or 3),
+                debug=False,
+            )
+            try:
+                email = inbox.create()
+                return email, inbox
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                if "429" in msg or "Rate limited" in msg:
+                    ra = 0.0
+                    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*s", msg)
+                    if m:
+                        try:
+                            ra = float(m.group(1))
+                        except Exception:
+                            ra = 0.0
+                    _note_tempmail_429(key, retry_after=ra)
+                    time.sleep(min(8.0, 1.5 * attempt))
+                    continue
+                raise
+        raise RuntimeError(f"Tempmail create failed after retries: {last_err}")
     elif backend == "cloudflare":
         from xconsole_client.mailbox import AliasMailAccount, AliasMailCodeReceiver
         with _cf_lock:
