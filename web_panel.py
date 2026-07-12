@@ -3,7 +3,7 @@
 
 Run:
   python web_panel.py
-  open http://127.0.0.1:8787
+  open http://<host>:8787  (default bind 0.0.0.0)
 
 Features:
   - YesCaptcha / EzSolver Turnstile backends
@@ -1335,7 +1335,7 @@ def index():
 def main() -> None:
     import uvicorn
 
-    host = os.environ.get("PANEL_HOST", "127.0.0.1")
+    host = os.environ.get("PANEL_HOST", "0.0.0.0")
     port = int(os.environ.get("PANEL_PORT", "8787"))
     print(f"grok-build-auth panel  http://{host}:{port}")
     print(f"  workdir: {_ROOT}")

@@ -225,7 +225,7 @@ See [`SECURITY.md`](SECURITY.md). Do not upload API keys, SSO JWTs, OAuth tokens
 
 ## Local Web Panel (optional)
 
-Run a local control UI (binds `127.0.0.1` only):
+Run a local control UI (binds `0.0.0.0` by default (all interfaces)):
 
 ```bash
 pip install fastapi uvicorn
@@ -255,5 +255,5 @@ Environment extras:
 | `CPA_PUSH_MODE` | `local` / `remote` / `both` / `none` | `both` |
 | `CPA_MANAGEMENT_URL` | e.g. `http://127.0.0.1:8317/v0/management` | — |
 | `CPA_MANAGEMENT_KEY` | Management bearer key | — |
-| `PANEL_HOST` / `PANEL_PORT` | Panel bind | `127.0.0.1` / `8787` |
+| `PANEL_HOST` / `PANEL_PORT` | Panel bind | `0.0.0.0` / `8787` |
 
